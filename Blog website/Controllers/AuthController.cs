@@ -1,5 +1,6 @@
 using Blog_website.Data;
 using Blog_website.Models;
+using Blog_website.Models.DTOs;
 using Blog_website.Services;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
@@ -23,6 +24,109 @@ namespace Blog_website.Controllers
             _tokenService = tokenService;
         }
 
+        // Admin registration endpoint (secured with a secret key)
+        [HttpPost("register-admin")]
+        public async Task<IActionResult> RegisterAdmin([FromBody] RegisterAdminDto model)
+        {
+            if (!ModelState.IsValid)
+                return BadRequest(ModelState);
+                
+            // Verify admin secret key (this should be stored in configuration)
+            string adminSecretKey = "admin-secret-key-change-this-in-production";  // In production, use configuration
+            if (model.AdminSecretKey != adminSecretKey)
+                return Unauthorized(new { message = "Invalid admin secret key" });
+                
+            // Check if user already exists
+            if (await _context.Users.AnyAsync(u => u.Email == model.Email || u.Username == model.Username))
+                return BadRequest(new { message = "Username or email already exists" });
+                
+            // Generate salt and hash password
+            var salt = PasswordHasher.GenerateSalt();
+            var passwordHash = PasswordHasher.HashPassword(model.Password, salt);
+                
+            // Create new admin user
+            var adminUser = new User
+            {
+                Username = model.Username,
+                Email = model.Email,
+                PasswordHash = passwordHash,
+                Salt = salt,
+                FirstName = model.FirstName,
+                LastName = model.LastName,
+                RegisteredDate = DateTime.UtcNow,
+                UserRoles = new List<UserRole>()
+            };
+                
+            // Ensure Admin role exists
+            var adminRole = await _context.Roles.FirstOrDefaultAsync(r => r.Name == "Admin");
+            if (adminRole == null)
+            {
+                // Create the admin role if it doesn't exist
+                adminRole = new Role { Name = "Admin", Description = "Administrator with full access" };
+                _context.Roles.Add(adminRole);
+                await _context.SaveChangesAsync();
+            }
+                
+            // First add the user to the database
+            _context.Users.Add(adminUser);
+            await _context.SaveChangesAsync();
+            
+            // Now assign Admin role (after user has an ID)
+            _context.UserRoles.Add(new UserRole { UserId = adminUser.Id, RoleId = adminRole.Id });
+            await _context.SaveChangesAsync();
+                
+            // Also add Author role if requested
+            if (model.IsAuthor)
+            {
+                var authorRole = await _context.Roles.FirstOrDefaultAsync(r => r.Name == "Author");
+                if (authorRole == null)
+                {
+                    // Create the author role if it doesn't exist
+                    authorRole = new Role { Name = "Author", Description = "Can create and manage blog posts" };
+                    _context.Roles.Add(authorRole);
+                    await _context.SaveChangesAsync();
+                }
+                
+                // Add the author role
+                _context.UserRoles.Add(new UserRole { UserId = adminUser.Id, RoleId = authorRole.Id });
+                await _context.SaveChangesAsync();
+                
+                // Create author profile if requested
+                if (model.CreateAuthorProfile)
+                {
+                    var author = new Author
+                    {
+                        FirstName = model.FirstName,
+                        LastName = model.LastName,
+                        Email = model.Email,
+                        Bio = model.Bio,
+                        ProfilePictureUrl = model.ProfilePictureUrl,
+                        JoinedDate = DateTime.UtcNow,
+                        UserId = adminUser.Id  // Set the user ID directly
+                    };
+                    
+                    _context.Authors.Add(author);
+                    await _context.SaveChangesAsync();
+                }
+            }
+                
+            // Generate and return token
+            var token = _tokenService.GenerateJwtToken(adminUser);
+            
+            // Set token in HTTP-only cookie
+            var cookieOptions = new CookieOptions
+            {
+                HttpOnly = true,
+                Secure = true,
+                SameSite = SameSiteMode.Strict,
+                Expires = DateTime.UtcNow.AddMinutes(300)
+            };
+            
+            Response.Cookies.Append("auth_token", token, cookieOptions);
+            
+            return Ok(new { message = "Admin user created successfully" });
+        }
+        
         [HttpPost("register")]
         public async Task<IActionResult> Register([FromBody] RegisterDto model)
         {
@@ -76,8 +180,11 @@ namespace Blog_website.Controllers
             if (!ModelState.IsValid)
                 return BadRequest(ModelState);
 
-            // Find user by email
-            var user = await _context.Users.SingleOrDefaultAsync(u => u.Email == model.Email);
+            // Find user by email and include roles
+            var user = await _context.Users
+                .Include(u => u.UserRoles)
+                .ThenInclude(ur => ur.Role)
+                .SingleOrDefaultAsync(u => u.Email == model.Email);
             if (user == null)
                 return Unauthorized(new { message = "Invalid email or password" });
 

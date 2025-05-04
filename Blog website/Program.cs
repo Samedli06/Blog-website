@@ -111,6 +111,14 @@ namespace Blog_website
 
             app.MapControllers();
 
+            // Seed the database with initial data
+            using (var scope = app.Services.CreateScope())
+            {
+                var services = scope.ServiceProvider;
+                var dbContext = services.GetRequiredService<Data.AppDbContext>();
+                Data.DbInitializer.Initialize(dbContext).Wait();
+            }
+
             app.Run();
         }
     }
